@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ner-mcp-fr"
+version = "0.1.0"
+description = "French named-entity recognition (PER, LOC, ORG, MISC) as an MCP server, with a verification CLI"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mathieu Lecarme", email = "mathieu@garambrogne.net" }]
+keywords = [
+    "ner",
+    "french",
+    "nlp",
+    "mcp",
+    "model-context-protocol",
+    "named-entity-recognition",
+    "transformers",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: French",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "transformers>=4.46,<6",
+    "torch>=2.4",
+]
+
+[project.scripts]
+ner-mcp-fr = "ner_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/athoune/ner-my-french"
+Repository = "https://github.com/athoune/ner-my-french"
+Issues = "https://github.com/athoune/ner-my-french/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ner_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ner_mcp",
+    "README.md",
+    "SPECS.md",
+    "LICENSE",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
