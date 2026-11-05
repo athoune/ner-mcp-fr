@@ -113,7 +113,7 @@ def render_markdown(result: ExtractionResult, source: str | None = None) -> str:
 def render_stats(result: ExtractionResult) -> str:
     """One diagnostic line, meant for stderr."""
     return (
-        f"model={result.model} profile={result.profile} device={result.device} "
+        f"model={result.model} precision={result.precision} device={result.device} "
         f"chunks={result.chunks} chars={result.text_length} "
         f"entities={len(result.entities)} dropped={result.dropped_by_min_score} "
         f"truncated={str(result.truncated).lower()} elapsed={result.elapsed_ms}ms"

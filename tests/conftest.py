@@ -13,7 +13,7 @@ SENTENCE = "Sylvain Boyer est à Paris."
 def sample_result() -> ExtractionResult:
     return ExtractionResult(
         model="CATIE-AQ/NERmemberta-4entities",
-        profile="fast",
+        precision="fp16",
         device="cpu",
         entities=[
             Entity(text="Sylvain Boyer", label="PER", start=0, end=13, score=0.9991),
@@ -31,7 +31,7 @@ def sample_result() -> ExtractionResult:
 def empty_result() -> ExtractionResult:
     return ExtractionResult(
         model="CATIE-AQ/NERmemberta-4entities",
-        profile="fast",
+        precision="fp16",
         device="cpu",
         entities=[],
         text_length=len(SENTENCE),

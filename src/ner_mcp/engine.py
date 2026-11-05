@@ -1,4 +1,4 @@
-"""Transformer-backed French NER engine.
+"""French NER engine: ONNX graph, our aggregation, no torch.
 
 This module knows nothing about MCP or argparse: it takes text in, gives schemas out. Both the
 MCP server and the CLI call it, so what you verify on the command line is exactly what an agent
@@ -10,8 +10,9 @@ Design notes:
   ``pipeline(aggregation_strategy="simple")`` because we must guarantee two things the pipeline
   does not: character offsets that validate against the original text, and windowing for texts
   longer than the model context.
-* Model inference is lazily loaded: ``tools/list`` and ``ner-mcp-fr info`` must work without
-  downloading 400 MB.
+* Inference runs on onnxruntime. `torch` is only needed to export the graph, never to use it,
+  which keeps the install at ~150 MB instead of ~780 MB.
+* Model loading is lazy: ``tools/list`` and ``ner-mcp-fr info`` work without downloading 210 MB.
 """
 
 from __future__ import annotations
@@ -21,17 +22,15 @@ import threading
 import time
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
+from .artifacts import ArtifactError
+from .backend import BackendError, OnnxBackend
 from .chunking import Window, split_windows
-from .config import LABELS, PROJECT_URL, Settings
+from .config import ATTRIBUTION, LABELS, PROJECT_URL, Settings
 from .schemas import BatchItem, BatchResult, Entity, ExtractionResult, ModelInfo
 
 LOGGER = logging.getLogger("ner_mcp.engine")
-
-# Extra room kept for special tokens ([CLS], [SEP], and padding on the last window).
-SPECIAL_TOKENS_RESERVE = 2
 
 # The model absorbs sentence punctuation and Markdown emphasis into entity spans: "Grand Rex.",
 # "Ebenezer**", "Saint-Asaph)**". Stripping runs at both edges, after merging (stripping earlier
@@ -53,18 +52,6 @@ class Outcome:
 
     result: ExtractionResult | None = None
     error: str | None = None
-
-
-@dataclass
-class _Loaded:
-    """Handles and derived limits, only available once the model is in memory."""
-
-    tokenizer: Any
-    model: Any
-    device: str
-    max_tokens: int
-    id2label: Mapping[int, str]
-    count_tokens: Any = field(repr=False)
 
 
 def aggregate_entities(
@@ -174,8 +161,7 @@ class NerEngine:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings.from_env()
         self._lock = threading.Lock()
-        self._loaded: _Loaded | None = None
-        self._torch: Any = None
+        self._backend = OnnxBackend(self.settings)
         if self.settings.preload:
             self.load()
 
@@ -183,87 +169,47 @@ class NerEngine:
 
     @property
     def loaded(self) -> bool:
-        return self._loaded is not None
+        return self._backend.loaded
 
     @property
     def device(self) -> str:
-        return self._loaded.device if self._loaded else self.settings.device
+        return self._backend.device if self.loaded else self.settings.device
+
+    @property
+    def precision(self) -> str:
+        return self._backend.precision
 
     def load(self) -> None:
-        """Load tokenizer and weights. Idempotent and thread-safe."""
+        """Download and open the graph. Idempotent and thread-safe."""
         with self._lock:
-            if self._loaded is not None:
+            if self._backend.loaded:
                 return
-            self._loaded = self._load()
-
-    def _load(self) -> _Loaded:
-        started = time.perf_counter()
-        try:
-            import torch
-            from transformers import AutoModelForTokenClassification, AutoTokenizer
-        except ImportError as exc:  # pragma: no cover - dependency error
-            raise EngineError(
-                "torch and transformers are required; install the project with `uv sync`"
-            ) from exc
-
-        self._torch = torch
-        if self.settings.threads:
-            torch.set_num_threads(self.settings.threads)
-
-        device = _resolve_device(torch, self.settings.device)
-        LOGGER.info(
-            "loading %s on %s, first run downloads the weights", self.settings.model_id, device
-        )
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.settings.model_id,
-                cache_dir=self.settings.cache_dir,
-                local_files_only=self.settings.offline,
+            started = time.perf_counter()
+            LOGGER.info(
+                "loading %s (%s), first run downloads the weights",
+                self.settings.artifact_file,
+                self.settings.artifact_repo,
             )
-            model = AutoModelForTokenClassification.from_pretrained(
-                self.settings.model_id,
-                cache_dir=self.settings.cache_dir,
-                local_files_only=self.settings.offline,
+            try:
+                self._backend.load()
+            except (BackendError, ArtifactError) as exc:
+                raise EngineError(str(exc)) from exc
+
+            unknown = set(self._backend.id2label.values()) - {"O", *LABELS}
+            if unknown:
+                LOGGER.warning(
+                    "%s has unexpected labels %s; only %s are reported",
+                    self.settings.model_id,
+                    sorted(unknown),
+                    ", ".join(LABELS),
+                )
+            LOGGER.info(
+                "model ready in %.1fs (%d-token context, %s, %s)",
+                time.perf_counter() - started,
+                self._backend.max_tokens,
+                self._backend.precision,
+                self.device,
             )
-        except Exception as exc:  # re-raised below with an actionable message
-            raise EngineError(
-                f"cannot load model {self.settings.model_id!r}: {exc}. "
-                "Check the network, or set NER_CACHE_DIR to an existing Hugging Face cache."
-            ) from exc
-
-        # Keep the checkpoint dtype: it is a property of the weights, not a user preference.
-        # Downcasting here would change predictions without anyone asking for it.
-        model.to(device=device)
-        model.eval()
-
-        id2label = {int(k): str(v) for k, v in model.config.id2label.items()}
-        unknown = set(id2label.values()) - {"O", *LABELS}
-        if unknown:
-            LOGGER.warning(
-                "%s has unexpected labels %s; only %s are reported",
-                self.settings.model_id,
-                sorted(unknown),
-                ", ".join(LABELS),
-            )
-
-        max_tokens = _max_tokens(model, tokenizer)
-
-        def count_tokens(chunk: str) -> int:
-            return len(tokenizer(chunk, add_special_tokens=False)["input_ids"])
-
-        LOGGER.info(
-            "model ready in %.1fs (%d-token context)",
-            time.perf_counter() - started,
-            max_tokens,
-        )
-        return _Loaded(
-            tokenizer=tokenizer,
-            model=model,
-            device=device,
-            max_tokens=max_tokens,
-            id2label=id2label,
-            count_tokens=count_tokens,
-        )
 
     # -- public API --------------------------------------------------------------------
 
@@ -337,34 +283,25 @@ class NerEngine:
         ]
         return BatchResult(
             model=self.settings.model_id,
-            profile=self.settings.profile,
+            precision=self.precision,
             device=self.device,
             results=items,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         )
 
-    def _dtype_label(self) -> str | None:
-        model = self._loaded.model if self._loaded else None
-        if model is None:
-            return None
-        return str(model.dtype).removeprefix("torch.")
-
     def info(self) -> ModelInfo:
         """Describe the engine without loading the model."""
         return ModelInfo(
             model=self.settings.model_id,
-            profile=self.settings.profile,
+            precision=self.precision,
             device=self.device,
             device_requested=self.settings.device,
-            dtype=self._dtype_label(),
             labels=list(LABELS),
-            max_tokens=self._loaded.max_tokens if self._loaded else None,
+            max_tokens=self._backend.max_tokens if self.loaded else None,
             max_input_chars=self.settings.max_input_chars,
             loaded=self.loaded,
             package_version=_package_version(),
-            attribution=(
-                "CATIE-AQ/NERmembert & NERmemberta, fine-tuned on frenchNER_4entities (MIT)"
-            ),
+            attribution=ATTRIBUTION,
             cache_dir=self.settings.cache_dir,
             project_url=PROJECT_URL,
         )
@@ -389,7 +326,7 @@ class NerEngine:
         outcomes = [Outcome() for _ in texts]
         plans: list[list[Window]] = []
         planned_indices: list[int] = []
-        loaded: _Loaded | None = None
+        backend: OnnxBackend | None = None
 
         for index, text in enumerate(texts):
             problem = self._validate_text(text)
@@ -397,16 +334,16 @@ class NerEngine:
                 outcomes[index] = Outcome(error=problem)
                 plans.append([])
                 continue
-            loaded = loaded or self._ensure_loaded()
-            plans.append(split_windows(text, loaded.count_tokens, loaded.max_tokens))
+            backend = backend or self._ensure_loaded()
+            plans.append(split_windows(text, backend.count_tokens, backend.max_tokens))
             planned_indices.append(index)
 
-        if loaded is None or not planned_indices:
+        if backend is None or not planned_indices:
             return outcomes
 
         # One batched pass over every window of every text.
         flat = [window.text for plan in plans for window in plan]
-        predictions = self._infer(flat, loaded, merge_adjacent=merge_adjacent)
+        predictions = self._infer(flat, backend, merge_adjacent=merge_adjacent)
 
         cursor = 0
         for index in planned_indices:
@@ -427,11 +364,10 @@ class NerEngine:
             )
         return outcomes
 
-    def _ensure_loaded(self) -> _Loaded:
-        if self._loaded is None:
+    def _ensure_loaded(self) -> OnnxBackend:
+        if not self._backend.loaded:
             self.load()
-        assert self._loaded is not None
-        return self._loaded
+        return self._backend
 
     def _validate_text(self, text: str) -> str | None:
         if not isinstance(text, str):
@@ -446,47 +382,28 @@ class NerEngine:
         return None
 
     def _infer(
-        self, texts: Sequence[str], loaded: _Loaded, *, merge_adjacent: bool = True
+        self, texts: Sequence[str], backend: OnnxBackend, *, merge_adjacent: bool = True
     ) -> list[list[Entity]]:
-        """Run the model and return per-window entities, with window-local offsets."""
-        torch = self._torch
-        predictions: list[list[Entity]] = []
-        batch_size = max(self.settings.batch_size, 1)
-        for start in range(0, len(texts), batch_size):
-            batch = list(texts[start : start + batch_size])
-            encoded = loaded.tokenizer(
-                batch,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=loaded.max_tokens,
-                return_offsets_mapping=True,
-            )
-            offsets = encoded.pop("offset_mapping").tolist()
-            word_ids = [encoded.word_ids(i) for i in range(len(batch))]
-            encoded = {key: value.to(loaded.device) for key, value in encoded.items()}
+        """Run the graph and aggregate, per window, with window-local offsets."""
+        try:
+            predictions = backend.predict(list(texts))
+        except BackendError as exc:
+            raise EngineError(str(exc)) from exc
 
-            with torch.inference_mode():
-                logits = loaded.model(**encoded).logits
-            probabilities = logits.softmax(dim=-1)
-
-            for i, text in enumerate(batch):
-                length = int(encoded["attention_mask"][i].sum())
-                token_probs = probabilities[i, :length]
-                best = token_probs.argmax(dim=-1)
-                best_scores = token_probs.gather(1, best.unsqueeze(1)).squeeze(1)
-                predictions.append(
-                    aggregate_entities(
-                        text=text,
-                        offsets=offsets[i][:length],
-                        word_ids=word_ids[i][:length],
-                        label_ids=best.tolist(),
-                        scores=best_scores.tolist(),
-                        id2label=loaded.id2label,
-                        merge_adjacent=merge_adjacent,
-                    )
+        entities: list[list[Entity]] = []
+        for text, prediction in zip(texts, predictions, strict=True):
+            entities.append(
+                aggregate_entities(
+                    text=text,
+                    offsets=prediction.offsets,
+                    word_ids=prediction.word_ids,
+                    label_ids=prediction.label_ids,
+                    scores=prediction.scores,
+                    id2label=backend.id2label,
+                    merge_adjacent=merge_adjacent,
                 )
-        return predictions
+            )
+        return entities
 
     def _assemble(
         self,
@@ -538,7 +455,7 @@ class NerEngine:
 
         return ExtractionResult(
             model=self.settings.model_id,
-            profile=self.settings.profile,
+            precision=self.precision,
             device=self.device,
             entities=kept,
             text_length=len(text),
@@ -593,32 +510,6 @@ def _normalize_labels(labels: Sequence[str] | None) -> set[str]:
             f"unknown labels {sorted(unknown)}; expected a subset of {', '.join(LABELS)}"
         )
     return normalized
-
-
-def _resolve_device(torch: Any, requested: str) -> str:
-    if requested == "auto":
-        if torch.cuda.is_available():
-            return "cuda"
-        mps = getattr(torch.backends, "mps", None)
-        if mps is not None and mps.is_available():
-            return "mps"
-        return "cpu"
-    if requested == "cuda" and not torch.cuda.is_available():
-        raise EngineError("NER_DEVICE=cuda but CUDA is not available")
-    if requested == "mps":
-        mps = getattr(torch.backends, "mps", None)
-        if mps is None or not mps.is_available():
-            raise EngineError("NER_DEVICE=mps but MPS is not available on this machine")
-    return requested
-
-
-def _max_tokens(model: Any, tokenizer: Any) -> int:
-    """Usable context, minus room for special tokens."""
-    limit = getattr(model.config, "max_position_embeddings", None)
-    tokenizer_limit = getattr(tokenizer, "model_max_length", None)
-    if tokenizer_limit and tokenizer_limit < 100_000:
-        limit = min(limit or tokenizer_limit, tokenizer_limit)
-    return max(int(limit or 512) - SPECIAL_TOKENS_RESERVE, 8)
 
 
 def _package_version() -> str:

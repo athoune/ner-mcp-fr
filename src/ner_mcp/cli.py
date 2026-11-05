@@ -19,7 +19,7 @@ import sys
 from dataclasses import replace
 
 from . import __version__
-from .config import LABELS, PROFILES, VALID_DEVICES, VALID_LOG_LEVELS, ConfigError, Settings
+from .config import LABELS, VALID_DEVICES, VALID_LOG_LEVELS, ConfigError, Settings
 from .engine import EngineError, NerEngine
 from .files import InputError, read_file, read_stdin
 from .render import (
@@ -95,8 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="keep the model's raw spans, trailing punctuation included",
     )
-    extract.add_argument("--profile", choices=tuple(PROFILES), default=None)
-    extract.add_argument("--model", default=None, help="explicit Hugging Face model id")
+    extract.add_argument(
+        "--model", default=None, help="upstream model id (tokenizer and label map)"
+    )
+    extract.add_argument("--onnx", default=None, help="local ONNX file instead of the download")
     extract.add_argument("--device", choices=VALID_DEVICES, default=None)
     extract.add_argument(
         "--encoding",
@@ -205,9 +207,8 @@ def _run_info(args: argparse.Namespace) -> int:
 
     rows = [
         ("model", info.model),
-        ("profile", info.profile),
+        ("precision", info.precision),
         ("device", _device_label(info)),
-        ("dtype", info.dtype or "from checkpoint (model not loaded)"),
         (
             "context",
             f"{info.max_tokens} tokens" if info.max_tokens else "unknown (model not loaded)",
@@ -234,12 +235,10 @@ def _device_label(info) -> str:
 def _settings_from_args(args: argparse.Namespace) -> Settings:
     settings = Settings.from_env()
     updates: dict[str, object] = {}
-    if args.profile:
-        updates["profile"] = args.profile
-        if not args.model:
-            updates["model_id"] = PROFILES[args.profile]
     if args.model:
         updates["model_id"] = args.model
+    if args.onnx:
+        updates["onnx_path"] = args.onnx
     if args.device:
         updates["device"] = args.device
     if args.min_score is not None:

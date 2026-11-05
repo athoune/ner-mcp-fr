@@ -6,32 +6,47 @@ import os
 
 import pytest
 
-from ner_mcp.config import PROFILES, ConfigError, Settings
+from ner_mcp.config import (
+    DEFAULT_ARTIFACT_FILE,
+    DEFAULT_ARTIFACT_REPO,
+    SOURCE_MODEL,
+    ConfigError,
+    Settings,
+)
 
 
-def test_defaults_use_the_fast_profile() -> None:
+def test_defaults_point_at_the_published_artifact() -> None:
     settings = Settings.from_env({})
-    assert settings.profile == "fast"
-    assert settings.model_id == PROFILES["fast"]
+    assert settings.model_id == SOURCE_MODEL
+    assert settings.artifact_repo == DEFAULT_ARTIFACT_REPO
+    assert settings.artifact_file == DEFAULT_ARTIFACT_FILE
     assert settings.device == "auto"
     assert settings.batch_size == 8
     assert settings.offline is False
+    assert settings.onnx_path is None
 
 
-def test_explicit_model_id_wins_over_profile() -> None:
-    settings = Settings.from_env({"NER_PROFILE": "large", "NER_MODEL_ID": "someone/else"})
-    assert settings.profile == "large"
-    assert settings.model_id == "someone/else"
+def test_artifact_can_be_overridden() -> None:
+    settings = Settings.from_env(
+        {"NER_ARTIFACT_REPO": "me/my-model", "NER_ARTIFACT_FILE": "model.onnx"}
+    )
+    assert settings.artifact_repo == "me/my-model"
+    assert settings.artifact_file == "model.onnx"
 
 
-def test_profile_selects_the_large_model() -> None:
-    settings = Settings.from_env({"NER_PROFILE": "large"})
-    assert settings.model_id == PROFILES["large"]
+def test_local_onnx_path_bypasses_the_download(tmp_path) -> None:
+    settings = Settings.from_env({"NER_ONNX_PATH": str(tmp_path / "model.onnx")})
+    assert settings.onnx_path == str(tmp_path / "model.onnx")
 
 
-def test_fast_profile_avoids_the_broken_camemberta_tokenizer() -> None:
+def test_mps_is_rejected_with_an_explanation() -> None:
+    with pytest.raises(ConfigError, match="no Metal provider"):
+        Settings.from_env({"NER_DEVICE": "mps"})
+
+
+def test_source_model_is_not_a_broken_camemberta_tokenizer() -> None:
     # The Camembertva models ship a byte-level tokenizer without merge rules; see SPECS.md.
-    assert "camemberta" not in PROFILES["fast"].lower()
+    assert "camemberta" not in SOURCE_MODEL.lower()
 
 
 def test_allowed_dirs_are_parsed_from_os_pathsep() -> None:
@@ -46,7 +61,6 @@ def test_allowed_dirs_default_to_no_restriction() -> None:
 @pytest.mark.parametrize(
     "env",
     [
-        {"NER_PROFILE": "xl"},
         {"NER_DEVICE": "tpu"},
         {"NER_LOG_LEVEL": "LOUD"},
         {"NER_MAX_INPUT_CHARS": "0"},

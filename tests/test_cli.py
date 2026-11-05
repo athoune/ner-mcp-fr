@@ -25,7 +25,7 @@ def _result(entities: list[Entity] | None = None) -> ExtractionResult:
         ]
     return ExtractionResult(
         model="CATIE-AQ/NERmemberta-4entities",
-        profile="fast",
+        precision="fp16",
         device="cpu",
         entities=entities,
         text_length=len(SENTENCE),
@@ -67,10 +67,9 @@ class FakeEngine:
     def info(self) -> ModelInfo:
         return ModelInfo(
             model="CATIE-AQ/NERmemberta-4entities",
-            profile="fast",
+            precision="fp16",
             device="cpu",
             device_requested="auto",
-            dtype="float32",
             labels=["PER", "LOC", "ORG", "MISC"],
             max_tokens=None,
             max_input_chars=200_000,

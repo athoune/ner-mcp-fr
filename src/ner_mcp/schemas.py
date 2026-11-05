@@ -27,7 +27,7 @@ class ExtractionResult(BaseModel):
     """Result of a single extraction."""
 
     model: str
-    profile: str
+    precision: str = Field(description="Weights precision of the ONNX artifact, e.g. fp16.")
     device: str
     entities: list[Entity]
     source: str | None = Field(
@@ -53,7 +53,7 @@ class BatchItem(BaseModel):
 
 class BatchResult(BaseModel):
     model: str
-    profile: str
+    precision: str
     device: str
     results: list[BatchItem]
     elapsed_ms: int = Field(ge=0)
@@ -62,14 +62,10 @@ class BatchResult(BaseModel):
 class ModelInfo(BaseModel):
     """Everything needed to diagnose a surprising extraction without a shell."""
 
-    model: str
-    profile: str
-    device: str = Field(description="Device actually used, or the request while unloaded.")
-    device_requested: str = Field(description="Configured device: auto, cpu, mps or cuda.")
-    dtype: str | None = Field(
-        default=None,
-        description="Weight dtype actually in use. Comes from the checkpoint, not from config.",
-    )
+    model: str = Field(description="Upstream model the tokenizer and label map come from.")
+    precision: str = Field(description="Weights precision of the ONNX artifact, e.g. fp16.")
+    device: str = Field(description="Execution provider actually used.")
+    device_requested: str = Field(description="Configured device: auto, cpu or cuda.")
     labels: list[str]
     max_tokens: int | None = Field(
         default=None, description="Model context limit in tokens; None until loaded."

@@ -13,19 +13,25 @@ from dataclasses import dataclass
 # Entity labels produced by the frenchNER_4entities models.
 LABELS: tuple[str, ...] = ("PER", "LOC", "ORG", "MISC")
 
-# Model shortcuts. Both are CamemBERT models: the CamemBERTa family
-# (CATIE-AQ/NERmemberta-*, NERmembert2-*) ships a byte-level tokenizer without merge rules,
-# which splits every word into characters and destroys predictions. Do not use it.
-# `fast` is 3x smaller for ~0.4 F1 point less; context is 512 tokens in both cases.
-PROFILES: dict[str, str] = {
-    "fast": "CATIE-AQ/NERmembert-base-4entities",
-    "large": "CATIE-AQ/NERmembert-large-4entities",
-}
+# Tokenizer and label map come from the upstream, MIT licensed model. The weights are an ONNX
+# file of ours, because onnxruntime cannot read PyTorch checkpoints.
+SOURCE_MODEL = "CATIE-AQ/NERmembert-base-4entities"
+DEFAULT_ARTIFACT_REPO = "athoune/ner-mcp-fr-onnx"
+DEFAULT_ARTIFACT_FILE = "model-fp16.onnx"
+# Printed by `scripts/export_onnx.py`. Pinning it means a swapped or corrupted artifact fails
+# loudly instead of silently changing predictions.
+DEFAULT_ARTIFACT_SHA256 = "afd6f6dad996fc2585ad33615e8434ba2734a8270e9e7ebc0deb217e062cd2b5"
 
-VALID_DEVICES = ("auto", "cpu", "mps", "cuda")
+VALID_DEVICES = ("auto", "cpu", "cuda")
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 PROJECT_URL = "https://github.com/athoune/ner-mcp-fr"
+
+UPSTREAM_LICENSE = "MIT"
+ATTRIBUTION = (
+    "CATIE-AQ/NERmembert, fine-tuned on frenchNER_4entities (MIT); "
+    "exported to ONNX by this project"
+)
 
 
 class ConfigError(ValueError):
@@ -36,8 +42,7 @@ class ConfigError(ValueError):
 class Settings:
     """Immutable runtime settings."""
 
-    profile: str = "fast"
-    model_id: str = PROFILES["fast"]
+    model_id: str = SOURCE_MODEL
     device: str = "auto"
     max_input_chars: int = 200_000
     batch_size: int = 8
@@ -49,23 +54,23 @@ class Settings:
     log_level: str = "INFO"
     # Empty means "no restriction": the server runs with the user's own permissions.
     allowed_dirs: tuple[str, ...] = ()
+    artifact_repo: str = DEFAULT_ARTIFACT_REPO
+    artifact_file: str = DEFAULT_ARTIFACT_FILE
+    artifact_sha256: str | None = None
+    # Local ONNX file, bypassing the download entirely (development, or a private export).
+    onnx_path: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         """Build settings from the process environment (or an explicit mapping)."""
         env = os.environ if env is None else env
 
-        profile = (env.get("NER_PROFILE") or "fast").strip().lower()
-        if profile not in PROFILES:
-            raise ConfigError(
-                f"NER_PROFILE={profile!r} is unknown; expected one of {', '.join(PROFILES)}"
-            )
-
-        # An explicit model ID wins, but the profile is still reported so callers know
-        # which shortcut was in effect.
-        model_id = (env.get("NER_MODEL_ID") or "").strip() or PROFILES[profile]
-
         device = (env.get("NER_DEVICE") or "auto").strip().lower()
+        if device == "mps":
+            raise ConfigError(
+                "NER_DEVICE=mps no longer applies: the ONNX backend has no Metal provider. "
+                "Use NER_DEVICE=auto or cpu (CoreML was measured slower than CPU)."
+            )
         if device not in VALID_DEVICES:
             raise ConfigError(
                 f"NER_DEVICE={device!r} is invalid; expected one of {', '.join(VALID_DEVICES)}"
@@ -79,8 +84,7 @@ class Settings:
             )
 
         return cls(
-            profile=profile,
-            model_id=model_id,
+            model_id=(env.get("NER_MODEL_ID") or "").strip() or SOURCE_MODEL,
             device=device,
             max_input_chars=_int(env, "NER_MAX_INPUT_CHARS", 200_000, minimum=1),
             batch_size=_int(env, "NER_BATCH_SIZE", 8, minimum=1),
@@ -91,6 +95,11 @@ class Settings:
             threads=_optional_int(env, "NER_THREADS", minimum=1),
             log_level=log_level,
             allowed_dirs=_paths(env, "NER_ALLOWED_DIRS"),
+            artifact_repo=(env.get("NER_ARTIFACT_REPO") or "").strip() or DEFAULT_ARTIFACT_REPO,
+            artifact_file=(env.get("NER_ARTIFACT_FILE") or "").strip() or DEFAULT_ARTIFACT_FILE,
+            artifact_sha256=(env.get("NER_ARTIFACT_SHA256") or "").strip()
+            or (DEFAULT_ARTIFACT_SHA256 or None),
+            onnx_path=(env.get("NER_ONNX_PATH") or "").strip() or None,
         )
 
 
