@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - name: Tag must match the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          packaged="v$(uv version --short)"
+          if [ "$packaged" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match $packaged; bump the version first."
+            exit 1
+          fi
+      - run: uv build
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Trusted publishing: no API token is stored in this repository. PyPI authenticates the
+  # workflow through OIDC, using the (pending) publisher configured for this exact repo,
+  # workflow name and environment. See docs/PUBLISHING.md.
+  publish-testpypi:
+    name: publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+
+  publish-pypi:
+    name: publish to PyPI
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  verify-published:
+    name: the user-facing command works
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@v10
+      - name: uvx ner-mcp-fr must run from PyPI alone
+        run: |
+          # This is the whole point of the release: a stranger types `uvx ner-mcp-fr` and it
+          # works. Resolve from PyPI, with no checkout of this repository.
+          for attempt in 1 2 3 4 5 6; do
+            if uvx --refresh ner-mcp-fr --version; then
+              exit 0
+            fi
+            echo "PyPI does not serve the new version yet (attempt $attempt), retrying in 15s"
+            sleep 15
+          done
+          echo "uvx ner-mcp-fr still fails after publication"
+          exit 1
+
+  github-release:
+    name: attach artifacts to the GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify-published
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
