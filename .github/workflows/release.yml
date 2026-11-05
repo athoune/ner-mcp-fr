@@ -95,12 +95,15 @@ jobs:
         run: |
           # This is the whole point of the release: a stranger types `uvx ner-mcp-fr` and it
           # works. Resolve from PyPI, with no checkout of this repository.
+          expected="ner-mcp-fr ${GITHUB_REF_NAME#v}"
           for attempt in 1 2 3 4 5 6; do
-            if uvx --refresh ner-mcp-fr --version; then
+            if reported=$(uvx --refresh ner-mcp-fr --version) && [ "$reported" = "$expected" ]; then
+              echo "$reported"
               exit 0
             fi
-            echo "PyPI does not serve the new version yet (attempt $attempt), retrying in 15s"
+            echo "PyPI does not serve ${GITHUB_REF_NAME} yet (got '${reported:-nothing}', attempt $attempt), retrying in 15s"
             sleep 15
+            reported=""
           done
           echo "uvx ner-mcp-fr still fails after publication"
           exit 1

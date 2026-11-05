@@ -63,7 +63,15 @@ jobs:
         run: |
           uvx twine check dist/*
       - name: Run the console script from the built wheel (no source tree)
-        run: uv tool run --from dist/*.whl ner-mcp-fr --version
+        run: |
+          # The version is read from package metadata at runtime, so it must equal the one in
+          # pyproject.toml. A drift here means `--version` lies about what was installed.
+          reported=$(uv tool run --from dist/*.whl ner-mcp-fr --version)
+          expected="ner-mcp-fr $(uv version --short)"
+          test "$reported" = "$expected" || {
+            echo "version drift: console script reports '$reported', package says '$expected'"
+            exit 1
+          }
       - name: Smoke test the CLI without downloading the model
         run: uv tool run --from dist/*.whl ner-mcp-fr info
       - uses: actions/upload-artifact@v7
