@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ner-mcp-fr"
-version = "0.1.1"
+version = "0.1.2"
 description = "French named-entity recognition (PER, LOC, ORG, MISC) as an MCP server, with a verification CLI"
 readme = "README.md"
 requires-python = ">=3.12"
