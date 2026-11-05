@@ -6,15 +6,14 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Reconnaissance d'entités nommées (NER) en français, exposée comme **serveur MCP** — avec un
-**CLI** pour vérifier ce que le modèle fait réellement.
+**CLI** pour vérifier ce que le modèle fait réellement. Inférence **ONNX**, sans torch.
 
 Quatre labels : `PER` (personne), `LOC` (lieu), `ORG` (organisation), `MISC` (divers).
 
-Le serveur n'entraîne rien : il s'appuie sur les modèles
+Le modèle est
 [`CATIE-AQ/NERmembert-base-4entities`](https://huggingface.co/CATIE-AQ/NERmembert-base-4entities)
-(défaut) et
-[`CATIE-AQ/NERmembert-large-4entities`](https://huggingface.co/CATIE-AQ/NERmembert-large-4entities),
-fine-tunés sur `frenchNER_4entities` (~385 k phrases), sous licence MIT.
+(CamemBERT-base, 110 M de paramètres, fine-tuné sur `frenchNER_4entities`, licence MIT), exporté
+en ONNX fp16 et hébergé séparément des poids PyTorch.
 
 > ⚠️ **Ne pas utiliser `NERmemberta-*` ni `NERmembert2-*`.** Ces modèles, pourtant marqués
 > `new_version` par leurs auteurs, publient un tokenizer byte-level sans règles de fusion : chaque
@@ -30,9 +29,10 @@ uvx ner-mcp-fr info      # ne charge pas le modèle, sert de test de fumée
 uvx ner-mcp-fr extract article.txt --format highlight
 ```
 
-Premier lancement : `uv` télécharge `torch` et `transformers` (~1 GB), puis le modèle
-(**420 MB** en profil `fast`, 1.34 GB en `large`) au premier appel. Côté mémoire, comptez
-~1.5 GB contre ~2.5 GB.
+Empreinte : **~150 MB installés** (onnxruntime, tokenizers, numpy, mcp), contre ~780 MB avec
+une pile PyTorch. Le premier appel télécharge les poids **fp16 (210 MB)** depuis Hugging Face,
+puis les garde en cache. Compromis assumé : ~70 ms par paragraphe sur CPU (contre ~16 ms avec
+torch + MPS sur Mac), pour un cinquième de la taille.
 
 Tant que le paquet n'est pas publié sur PyPI, la même chose depuis GitHub :
 
@@ -48,9 +48,6 @@ cd ner-mcp-fr
 uv sync
 uv run pytest
 ```
-
-La publication PyPI est automatisée depuis GitHub (tag `v*` → CI → TestPyPI/PyPI → release) :
-voir [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ## Le CLI : vérifier une analyse
 
@@ -70,9 +67,9 @@ Exemple de sortie `--format text` :
 ```
 LABEL  SCORE   SPAN        TEXT
 -----  ------  ----------  -------------------
-LOC    0.9991  [334,339)   'Paris'
-ORG    0.9912  [361,370)   'Grand Rex'
-PER    0.9987  [467,480)   'Sylvain Boyer'
+MISC   0.9456  [36,38)     'JO'
+LOC    0.9993  [75,84)     'Grand Rex'
+PER    0.9989  [165,178)   'Sylvain Boyer'
 ```
 
 Formats disponibles :
@@ -91,8 +88,8 @@ Options utiles :
 ner-mcp-fr extract article.txt --labels PER,LOC      # filtre les labels
 ner-mcp-fr extract article.txt --min-score 0.9       # exige de la confiance
 ner-mcp-fr extract article.txt --keep-punctuation    # spans bruts du modèle
+ner-mcp-fr extract article.txt --onnx ./model.onnx   # poids locaux, sans téléchargement
 ner-mcp-fr extract article.txt --stats               # chunks/timing sur stderr
-ner-mcp-fr extract article.txt --profile large       # meilleur F1, contexte 512 tokens
 ner-mcp-fr extract article.txt --fail-on-empty       # code 3 si aucune entité
 ```
 
@@ -109,8 +106,7 @@ Configuration d'un hôte :
   "mcpServers": {
     "ner-fr": {
       "command": "uvx",
-      "args": ["ner-mcp-fr"],
-      "env": { "NER_PROFILE": "fast" }
+      "args": ["ner-mcp-fr"]
     }
   }
 }
@@ -123,26 +119,25 @@ Quatre outils :
 | `ner_extract` | un texte inline → entités |
 | `ner_extract_file` | **un chemin** → entités, fichier lu côté serveur |
 | `ner_batch` | jusqu'à 64 textes en une passe ; une entrée invalide n'annule pas le lot |
-| `ner_info` | modèle, device, contexte, statut de chargement — sans charger |
+| `ner_info` | modèle, précision, provider, contexte, statut — sans charger |
 
 **Pourquoi `ner_extract_file` existe** : un texte de 200 kB collé dans `ner_extract` traverse le
 contexte du modèle deux fois (lecture + historique). Avec un chemin, il ne traverse jamais rien :
-le serveur lit le fichier en local. Dès qu'un texte vient d'un fichier, préférez cette voie.
-`source` dans la réponse est le chemin absolu résolu, pour tracer l'origine sans renvoyer le
-texte. `NER_ALLOWED_DIRS` restreint les chemins lisibles si le serveur ingère du contenu non
-fiable.
+le serveur lit le fichier en local. `source` dans la réponse est le chemin absolu résolu, pour
+tracer l'origine sans renvoyer le texte. `NER_ALLOWED_DIRS` restreint les chemins lisibles si le
+serveur ingère du contenu non fiable.
 
 Réponse de `ner_extract` :
 
 ```json
 {
   "model": "CATIE-AQ/NERmembert-base-4entities",
-  "profile": "fast",
-  "device": "mps",
-  "source": "/Users/moi/article.txt",
+  "precision": "fp16",
+  "device": "CPUExecutionProvider",
   "entities": [
     { "text": "Paris", "label": "LOC", "start": 334, "end": 339, "score": 0.9991 }
   ],
+  "source": "/Users/moi/article.txt",
   "text_length": 617,
   "chunks": 1,
   "truncated": false,
@@ -157,19 +152,20 @@ texte contenant des emoji, préférer le champ `text`.
 
 ## Configuration
 
-Tout se règle par variables d'environnement (voir `SPECS.md` §11) :
-
 | Variable | Défaut | Effet |
 |---|---|---|
-| `NER_PROFILE` | `fast` | `fast` (420 MB, 512 tokens) ou `large` (1.34 GB, 512 tokens) |
-| `NER_MODEL_ID` | — | model ID explicite, prioritaire sur le profil |
-| `NER_DEVICE` | `auto` | `auto`, `cpu`, `mps`, `cuda` |
-| `NER_MAX_INPUT_CHARS` | `200000` | garde-fou de taille d'entrée |
+| `NER_MODEL_ID` | `CATIE-AQ/NERmembert-base-4entities` | source du tokenizer et de la table de labels |
+| `NER_ARTIFACT_REPO` | `athoune/ner-mcp-fr-onnx` | dépôt Hugging Face des poids ONNX |
+| `NER_ARTIFACT_FILE` | `model-fp16.onnx` | fichier de poids dans ce dépôt |
+| `NER_ONNX_PATH` | — | fichier ONNX local, court-circuite le téléchargement |
+| `NER_DEVICE` | `auto` | `auto`, `cpu`, `cuda` (provider onnxruntime) |
+| `NER_MAX_INPUT_CHARS` | `200000` | garde-fou de taille, aussi borne des fichiers |
 | `NER_BATCH_SIZE` | `8` | fenêtres par passe |
 | `NER_MIN_SCORE` | `0.0` | seuil de confiance par défaut |
 | `NER_CACHE_DIR` | — | cache Hugging Face alternatif |
 | `NER_PRELOAD` | `0` | charge le modèle au démarrage |
 | `NER_OFFLINE` | `0` | `1` = aucun accès réseau |
+| `NER_THREADS` | — | threads onnxruntime |
 | `NER_LOG_LEVEL` | `INFO` | logs sur stderr (stdout = protocole) |
 | `NER_ALLOWED_DIRS` | — | répertoires autorisés pour `ner_extract_file` (`:`) |
 
@@ -177,16 +173,15 @@ Tout se règle par variables d'environnement (voir `SPECS.md` §11) :
 
 - **Français uniquement.** Aucune détection de langue : sur de l'anglais, le modèle produit des
   entités plausibles mais non fiables.
-- **Contexte 512 tokens** dans les deux profils. Au-delà, le texte est découpé en fenêtres avec
+- **Contexte 512 tokens** (~350 mots). Au-delà, le texte est découpé en fenêtres avec
   chevauchement d'une phrase ; `chunks` l'indique. Rien n'est tronqué silencieusement.
-- La précision des poids n'est pas réglable : elle vient du checkpoint. Un half-precision forcé
-  changerait les prédictions sans le dire.
-- `MISC` est le label le plus faiblement performant (F1 ≈ 0.81) : attendez-vous à du bruit.
+- **CPU uniquement**, sauf `onnxruntime-gpu` installé et `NER_DEVICE=cuda`. Le provider CoreML a
+  été mesuré plus lent que le CPU sur ce graphe (29 nœuds accélérés sur 597).
+- **fp16** : sortie identique au fp32 sur le corpus de référence, mais la quantization int8, elle,
+  détruit le modèle (F1 0,53 en dynamique, 0,00 en statique). Ne pas la réintroduire sans mesure.
+- `MISC` est le label le plus faiblement performant (F1 ≈ 0,81) : attendez-vous à du bruit.
 - La ponctuation et le balisage Markdown de bord sont retirés des entités (`Grand Rex.` →
-  `Grand Rex`, `Ebenezer**` → `Ebenezer`, `| Paris |` → `Paris`) ; `--keep-punctuation` rend les
-  spans bruts, utile pour auditer le modèle lui-même.
-- Le profil `fast` privilégie vitesse et empreinte mémoire ; `large` reste le meilleur F1
-  (0.982 / 0.964 / 0.919 / 0.834 contre 0.979 / 0.961 / 0.915 / 0.812).
+  `Grand Rex`, `Ebenezer**` → `Ebenezer`) ; `--keep-punctuation` rend les spans bruts.
 
 ## Développement
 
@@ -195,10 +190,19 @@ uv run pytest        # tests unitaires (aucun modèle téléchargé)
 uv run ruff check .
 ```
 
-Architecture : `engine.py` (modèle, chunking, agrégation — sans MCP), `cli.py` + `render.py`
-(CLI), `server.py` (trois outils MCP). Le contrat complet est dans `SPECS.md`.
+Re-exporter les poids (seule étape qui demande torch) :
+
+```bash
+uv run --group export python scripts/export_onnx.py
+# écrit dist/onnx/model-fp16.onnx et affiche son SHA-256
+```
+
+Architecture : `backend.py` (session ONNX + tokenizer), `artifacts.py` (téléchargement, cache,
+vérification du SHA-256), `engine.py` (chunking, agrégation — sans MCP), `cli.py` + `render.py`
+(CLI), `server.py` (quatre outils MCP). Le contrat complet est dans `SPECS.md`.
 
 ## Attribution
 
 Modèles fine-tunés par [CATIE-AQ](https://huggingface.co/CATIE-AQ) sur le jeu
-`frenchNER_4entities`, publiés sous licence MIT. Ce projet ne fait que les servir.
+`frenchNER_4entities`, publiés sous licence MIT. Le graphe ONNX est un export de
+`NERmembert-base-4entities`, distribué sous la même licence.

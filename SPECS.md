@@ -96,23 +96,29 @@ dans le README et dans la réponse de l'outil `ner_info`.
 
 | Choix | Justification |
 |---|---|
-| **Python ≥ 3.12** (3.12 recommandé, 3.13 acceptable) | `torch` et `transformers` 5.x exigent ≥ 3.11 ; cibler 3.12 évite les roulettes de compatibilité. |
+| **Python ≥ 3.12** (3.12 recommandé, 3.13/3.14 fonctionnels) | `onnxruntime` publie des wheels 3.11 → 3.14 : plus de contrainte liée à torch. |
 | **`mcp` SDK v2.x** (`from mcp.server import MCPServer`) | SDK officiel. ⚠️ Le nom `FastMCP` de la v1 a été remplacé par `MCPServer` en v2 ; toute doc/tutoriel v1 est à ignorer. |
-| **`transformers` + `torch`** | Référence du snippet. |
+| **`onnxruntime`** | Exécute le graphe. 75 MB installé contre 581 MB pour torch (macOS arm64). |
+| **`tokenizers`** | Tokenisation seule, 9,5 MB : ids, offsets et `word_ids` vérifiés identiques à `AutoTokenizer`, donc `transformers` (56 MB) devient inutile au runtime. |
+| **`huggingface-hub`** | Téléchargement et cache des poids, mode hors-ligne. |
+| **`numpy`** | Batching, softmax, argmax. |
+| **`torch` + `transformers`** | **groupe `export` uniquement**, pour produire le `.onnx`. Jamais installés par `uvx`. |
 | **`uv`** | Gestion d'environnement et `uvx` pour l'exécution sans installation. |
 | **`pydantic`** (via le SDK) | Schémas d'entrée/sortie des outils. |
 | **`argparse`** (stdlib) | CLI sans dépendance supplémentaire : `typer`/`click` n'apportent rien pour 3 sous-commandes. |
 | **`pytest` + `ruff`** | Tests et lint. |
 
-`torch` uniquement, pas d'`onnxruntime` en v1 : la conversion ONNX est une optimisation
-ultérieure, pas une condition de livraison.
+**Pourquoi ONNX.** Avec torch, `uvx ner-mcp-fr` installait 778 MB, dont 581 MB de torch : un
+outil qui analyse des phrases coûtait le prix d'un framework d'entraînement. ONNX ramène
+l'installation à **149 MB** mesurés, sans changer le modèle ni une seule entité produite.
 
-**La précision (dtype) n'est pas un réglage.** Elle appartient au checkpoint : le charger en
-`float32` puis le convertir en `bfloat16` change les prédictions sans que personne l'ait demandé,
-et le faire dépendre d'une variable d'environnement revient à laisser un typo dégrader
-silencieusement le service. On charge donc le dtype du fichier de poids, et `ner_info` le
-*rapporte*. Une éventuelle accélération half-precision sera un profil explicite et mesuré, pas un
-bouton de configuration.
+Les mesures qui ont décidé du reste (§18) : fp32 ONNX est identique au torch au bit près ; fp16
+donne les mêmes entités pour moitié de téléchargement ; int8 détruit le modèle. D'où **fp16 par
+défaut, int8 interdit**.
+
+**La précision n'est pas un réglage utilisateur.** Elle est portée par l'artefact publié et
+seulement *rapportée* par `ner_info`. Une variable d'environnement qui changerait les poids
+reviendrait à laisser un typo modifier les prédictions.
 
 ## 6. Architecture
 
@@ -123,10 +129,12 @@ ner-mcp-fr/
 ├── pyproject.toml             # project + extras + script ner-mcp-fr
 ├── src/ner_mcp/
 │   ├── __init__.py            # __version__
-│   ├── config.py              # Settings (env vars), profils de modèle
+│   ├── config.py              # Settings (env vars), constantes des artefacts
 │   ├── schemas.py             # Pydantic: Entity, ExtractionResult, BatchResult, ModelInfo
 │   ├── chunking.py            # découpage phrase-aware + remapping d'offsets
-│   ├── engine.py              # chargement modèle, tokenisation, inférence, agrégation
+│   ├── artifacts.py           # téléchargement, cache, vérification SHA-256
+│   ├── backend.py             # session onnxruntime + tokenizer, batching
+│   ├── engine.py              # chunking, agrégation, filtrage (sans MCP)
 │   ├── files.py               # lecture fichier/STDIN partagée CLI + outil MCP
 │   ├── render.py              # formats de sortie (json, text, highlight, markdown)
 │   ├── server.py              # MCPServer, définition des tools, main()
@@ -138,40 +146,48 @@ ner-mcp-fr/
 │   ├── test_files.py          # lecture fichier, encodage, allowlist
 │   ├── test_render.py         # formats json/text/highlight/markdown sur résultat figé
 │   └── test_cli.py            # parsing, codes de sortie, fichier vs STDIN
+├── scripts/export_onnx.py     # export fp16 reproductible (groupe `export`, torch)
 └── .gitignore
 ```
 
-Séparation stricte : `engine.py` **ne connaît pas MCP**, `server.py` **ne connaît pas torch**.
+Séparation stricte : `backend.py` **ne connaît pas MCP**, `engine.py` **ne connaît ni MCP ni
+onnxruntime**, `server.py` **ne connaît ni torch ni ONNX**.
 Cela rend le moteur testable sans protocole et réutilisable (CLI, HTTP plus tard).
 
 ### Cycle de vie du modèle
 
 - Chargement **paresseux** au premier appel d'outil, protégé par un verrou (le SDK peut
   recevoir des requêtes concurrentes).
-- `model.eval()` + `torch.inference_mode()` systématiquement.
+- Session `onnxruntime` en `ORT_ENABLE_ALL`, sans état d'entraînement.
 - Chargement **optionnellement anticipé** (`NER_PRELOAD=1`) pour ne pas payer le coût au premier
   appel.
 - Un échec de téléchargement (réseau, cache, token) remonte une erreur MCP explicite avec la
   cause et la remédiation, jamais une trace Python brute.
 
-## 7. Profils de modèle
+## 7. Poids du modèle
 
-| Profil | Model ID | Contexte | Poids | Usage |
-|---|---|---|---|---|
-| `fast` (**défaut**) | `CATIE-AQ/NERmembert-base-4entities` | 512 | 420 MB | Démarrage rapide, gros volumes, machines modestes |
-| `large` | `CATIE-AQ/NERmembert-large-4entities` | 512 | 1.34 GB | Précision max, reproduction exacte du snippet |
+Un seul modèle, servi par un **graphe ONNX fp16** hébergé à part des poids PyTorch.
 
-Le défaut `fast` est un arbitrage de coût : 3× moins de mémoire pour ~0.4 pt de F1. Il ne s'agit
-**pas** du modèle du snippet — le README dit comment retrouver le comportement exact
-(`NER_PROFILE=large`), sinon on ment sur ce qu'on livre.
+| Élément | Valeur |
+|---|---|
+| Source (tokenizer + `id2label`) | `CATIE-AQ/NERmembert-base-4entities` |
+| Poids servis | `athoune/ner-mcp-fr-onnx` → `model-fp16.onnx` (210 MB) |
+| Contexte | 512 tokens |
+| SHA-256 épinglé | oui, dans `config.py` (`DEFAULT_ARTIFACT_SHA256`) |
+| Licence | MIT (export d'un modèle MIT) |
+
+`onnxruntime` ne sait pas lire un checkpoint PyTorch, d'où ce second dépôt : un seul fichier,
+produit par `scripts/export_onnx.py`. Le tokenizer et la table de labels restent chez CATIE-AQ —
+inutile de recopier des fichiers déjà fiables.
+
+Le profil `large` (336 M) **disparaît** : son artefact fp16 pèserait 670 MB, pour un gain de F1
+non démontré sur du texte réel (`base` et `large` donnent les mêmes 10 entités sur le texte de
+référence, avec des scores quasi identiques). Le script sait l'exporter ; il n'est simplement pas
+publié.
 
 ⚠️ **Ne pas utiliser `CATIE-AQ/NERmemberta-*` ni `NERmembert2-*`** : leur tokenizer byte-level
-est publié sans règles de fusion, ce qui détruit les prédictions (§2). Un test verrouille ce
-choix (`test_fast_profile_avoids_the_broken_camemberta_tokenizer`).
-
-Le profil est un **raccourci** : `NER_MODEL_ID` peut pointer n'importe quel modèle de
-token-classification compatible (`id2label` 5 labels attendus, sinon avertissement explicite).
-Un model ID inconnu n'est jamais silencieusement remplacé.
+est publié sans règles de fusion, ce qui détruit les prédictions (§2). Deux tests verrouillent
+`SOURCE_MODEL`.
 
 ## 8. Contrat des outils MCP
 
@@ -224,13 +240,13 @@ Règles :
 **Entrée** : `texts: string[]` (1..64), mêmes filtres que `ner_extract`.
 **Sortie** : `{ "results": [{"index": 0, "text_length": …, "entities": [...]}, …], "model": …, "elapsed_ms": … }`
 
-Traitement en **un seul batch torch** (padding dynamique) pour exploiter le matériel. Un texte
+Traitement en **un seul batch ONNX** (padding dynamique) pour exploiter le matériel. Un texte
 invalide dans le lot ne fait pas échouer les autres : il renvoie une entrée avec `error`.
 
 ### 8.4 `ner_info` — introspection
 
 **Entrée** : aucune.
-**Sortie** : model ID, révision, profil, device, dtype, labels, `max_tokens`, stratégie de
+**Sortie** : model ID, précision, provider, labels, `max_tokens`, stratégie de
 chunking, statut de chargement, version du paquet, licence et attribution, et les compteurs de
 la dernière requête (`elapsed_ms`, `chunks`, `truncated`).
 
@@ -242,8 +258,8 @@ device CPU au lieu de MPS, texte tronqué) n'a aucun moyen de le diagnostiquer s
 ```jsonc
 {
   "model": "CATIE-AQ/NERmembert-base-4entities",
-  "profile": "fast",
-  "device": "mps",
+  "precision": "fp16",
+  "device": "CPUExecutionProvider",
   "source": "/Users/moi/article.txt",
   "entities": [
     {
@@ -323,21 +339,26 @@ Règles :
 
 ### 10.3 Matériel
 
-- `NER_DEVICE=auto` : `mps` sur Apple Silicon si disponible, sinon `cuda`, sinon `cpu`.
-- **Dtype = celui du checkpoint**, jamais un réglage utilisateur. Convertir les poids change les
-  prédictions ; on ne le fait pas par configuration. `ner_info` rapporte le dtype réellement
-  chargé. Mesuré : 1.34 GB de poids `large` chargés en 45 s à froid sur MPS (dont
-  téléchargement), ~4 s une fois en cache.
-- `torch.set_num_threads` configurable (`NER_THREADS`), forçage du mode inférence, pas de
-  gradient.
+- `NER_DEVICE=auto` : `CUDAExecutionProvider` si `onnxruntime-gpu` est installé, sinon CPU.
+- **CoreML est écarté après mesure** : 29 nœuds supportés sur 597, 171 ms contre 74 ms sur le
+  texte de référence, à cause des frontières de partition. Le CPU gagne.
+- `NER_DEVICE=mps` est **rejeté avec un message explicite** : il n'existe pas de provider Metal,
+  et laisser croire le contraire ferait perdre une heure à quelqu'un.
+- Pas de gradient, pas de mode entraînement : une session `InferenceSession` avec
+  `ORT_ENABLE_ALL`. `NER_THREADS` règle `intra_op_num_threads`.
+- Chargement mesuré : 1,5 s à chaud (session + tokenizer), 71 ms par paragraphe de 678
+  caractères, 1,2 s pour 10 kB (5 fenêtres, 154 entités).
 
 ## 11. Configuration (variables d'environnement)
 
 | Variable | Défaut | Effet |
 |---|---|---|
-| `NER_PROFILE` | `fast` | `fast` ou `large` |
-| `NER_MODEL_ID` | (profil) | override explicite du model ID |
-| `NER_DEVICE` | `auto` | `auto`/`cpu`/`mps`/`cuda` |
+| `NER_MODEL_ID` | `CATIE-AQ/NERmembert-base-4entities` | source du tokenizer et de `id2label` |
+| `NER_ARTIFACT_REPO` | `athoune/ner-mcp-fr-onnx` | dépôt Hugging Face des poids ONNX |
+| `NER_ARTIFACT_FILE` | `model-fp16.onnx` | fichier de poids |
+| `NER_ARTIFACT_SHA256` | (épinglé) | vérification d'intégrité, échec explicite si divergence |
+| `NER_ONNX_PATH` | — | fichier local, court-circuite le téléchargement |
+| `NER_DEVICE` | `auto` | `auto`/`cpu`/`cuda` (provider onnxruntime) |
 | `NER_MAX_INPUT_CHARS` | `200000` | garde-fou anti-DoS mémoire, aussi borne des fichiers |
 | `NER_BATCH_SIZE` | `8` | fenêtres par passe (`ner_batch`) |
 | `NER_MIN_SCORE` | `0.0` | filtre global par défaut |
@@ -387,8 +408,9 @@ page web, ce que ce projet n'est pas. Aucun argument = `mcp`, pour que la config
 | `--min-score` | config | filtre de confiance |
 | `--no-merge` | fusion activée | désactive `merge_adjacent` |
 | `--keep-punctuation` | nettoyage activé | conserve les spans bruts du modèle |
-| `--profile` / `--model` | config | force un profil ou un model ID |
-| `--device` | config | `auto`/`cpu`/`mps`/`cuda` |
+| `--model` | config | force le modèle source (tokenizer + labels) |
+| `--onnx` | config | poids ONNX locaux, sans téléchargement |
+| `--device` | config | `auto`/`cpu`/`cuda` |
 | `--color` / `--no-color` | auto (TTY) | force ou coupe l'ANSI |
 | `--encoding` | `utf-8` (BOM détecté) | encodage du fichier/STDIN |
 | `--no-legend` | — | masque la légende des couleurs |
@@ -424,7 +446,7 @@ décodage, modèle) ; `2` erreur d'usage (argparse) ; `3` `--fail-on-empty` sans
 
 ### 12.3 `info`
 
-Équivalent terminal de `ner_info` : model ID, profil, device, dtype, `max_tokens`, budget de
+Équivalent terminal de `ner_info` : model ID, précision, provider, `max_tokens`, budget de
 chunking, labels, version du paquet, licence et attribution, statut de chargement, chemin du
 cache. Ne charge **pas** le modèle.
 
@@ -453,7 +475,7 @@ cache. Ne charge **pas** le modèle.
 - **`ner_extract_file`** existe parce que le coût dominant d'un outil MCP est le texte qui
   traverse le contexte : passer un chemin au lieu du contenu est un gain direct, pas une
   commodité.
-- **Le dtype n'est pas configurable** : il appartient au checkpoint (§5).
+- **La précision n'est pas configurable** : elle appartient à l'artefact publié (§5).
 - La sous-commande du serveur s'appelle **`mcp`**, pas `serve` : pas de fausse promesse de
   serveur HTTP.
 - **La ponctuation de bord est retirée** des entités par défaut (`trim_punctuation`). Le modèle
@@ -552,6 +574,8 @@ GitHub » sans paquet publié serait faux.
 | `.github/workflows/release.yml` | tag `v*` → CI → build → TestPyPI ou PyPI → **vérification de `uvx ner-mcp-fr`** → release GitHub |
 | `docs/PUBLISHING.md` | procédure exacte, y compris le *pending publisher* |
 | `.github/dependabot.yml` | actions et dépendances `uv` à jour |
+| `scripts/export_onnx.py` | export fp16 reproductible + SHA-256 |
+| `athoune/ner-mcp-fr-onnx` (HF) | héberge `model-fp16.onnx`, 210 MB ; le paquet PyPI reste à 40 kB |
 
 Décisions :
 
@@ -568,3 +592,29 @@ Décisions :
   GitHub n'est pas créée.
 - Le paquet n'embarque **aucun poids de modèle** : 26 kB de wheel, le modèle est téléchargé à
   l'exécution depuis Hugging Face. C'est ce qui rend `uvx` instantané à installer (hors `torch`).
+
+## 18. Bascule ONNX : mesures et options écartées
+
+Décision du 2026-11-05, après mesures sur `NERmembert-base` (Corpus : 40 phrases, 880 mots ;
+texte de référence : le paragraphe JO).
+
+| Variante | Taille | F1 vs torch | Verdict |
+|---|---|---|---|
+| torch fp32 (avant) | 778 MB installés | référence | abandonné : 581 MB de framework |
+| ONNX fp32 | 419 MB + 149 MB installés | **1,000** (40/40 phrases identiques) | correct, téléchargement lourd |
+| **ONNX fp16** | 210 MB + 149 MB installés | **1,000** (40/40) | **retenu** |
+| ONNX int8 dynamique | 106 MB | 0,526 | rejeté |
+| ONNX int8 statique (QDQ, calibration 40 phrases) | 106 MB | 0,000 | rejeté |
+
+Latence (Mac, CPU) : 71 ms par paragraphe en fp32, 80 ms en fp16, 1,2 s pour 10 kB. torch + MPS
+faisait 16 ms et 103 ms : c'est le prix de 5× moins de taille, assumé pour un usage par
+paragraphe.
+
+Providers locaux (Ollama, LM Studio, llama.cpp, MLX) : **écartés**. Ce sont des serveurs de
+modèles génératifs ; il n'existe pas d'API de token-classification avec scores et offsets. Il
+faudrait demander du JSON à un LLM, ce qui casse l'invariant `text[start:end] == entity.text`,
+remplace une probabilité calibrée par une génération non déterministe, coûte des tokens par
+document et déplace la taille (modèle plus gros + serveur à installer) au lieu de la réduire. MLX
+est de surcroît macOS-only, donc incompatible avec un paquet `uvx` portable.
+
+CoreML EP : mesuré plus lent que le CPU (29 nœuds couverts sur 597). Écarté.
