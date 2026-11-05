@@ -1,6 +1,6 @@
-# ner-my-french
+# ner-mcp-fr
 
-[![CI](https://github.com/athoune/ner-my-french/actions/workflows/ci.yml/badge.svg)](https://github.com/athoune/ner-my-french/actions/workflows/ci.yml)
+[![CI](https://github.com/athoune/ner-mcp-fr/actions/workflows/ci.yml/badge.svg)](https://github.com/athoune/ner-mcp-fr/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ner-mcp-fr)](https://pypi.org/project/ner-mcp-fr/)
 [![Python](https://img.shields.io/pypi/pyversions/ner-mcp-fr)](https://pypi.org/project/ner-mcp-fr/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -37,14 +37,14 @@ Premier lancement : `uv` télécharge `torch` et `transformers` (~1 GB), puis le
 Tant que le paquet n'est pas publié sur PyPI, la même chose depuis GitHub :
 
 ```bash
-uvx --from git+https://github.com/athoune/ner-my-french ner-mcp-fr info
+uvx --from git+https://github.com/athoune/ner-mcp-fr ner-mcp-fr info
 ```
 
 Pour développer :
 
 ```bash
-git clone https://github.com/athoune/ner-my-french
-cd ner-my-french
+git clone https://github.com/athoune/ner-mcp-fr
+cd ner-mcp-fr
 uv sync
 uv run pytest
 ```

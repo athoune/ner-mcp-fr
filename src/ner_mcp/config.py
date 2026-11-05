@@ -25,7 +25,7 @@ PROFILES: dict[str, str] = {
 VALID_DEVICES = ("auto", "cpu", "mps", "cuda")
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
-PROJECT_URL = "https://github.com/athoune/ner-my-french"
+PROJECT_URL = "https://github.com/athoune/ner-mcp-fr"
 
 
 class ConfigError(ValueError):

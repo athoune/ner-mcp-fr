@@ -5,7 +5,7 @@ manuelle.
 
 **Ce que `uvx` ne fait pas.** `uvx ner-mcp-fr` résout le nom **sur PyPI**. GitHub seul ne suffit
 pas : tant que le paquet n'est pas publié, la commande équivalente est
-`uvx --from git+https://github.com/athoune/ner-my-french ner-mcp-fr`. Ce document met en place la
+`uvx --from git+https://github.com/athoune/ner-mcp-fr ner-mcp-fr`. Ce document met en place la
 publication automatique depuis GitHub, puis la voie de secours.
 
 ---
@@ -13,10 +13,11 @@ publication automatique depuis GitHub, puis la voie de secours.
 ## 1. Créer le dépôt et pousser `main`
 
 ```bash
-# depuis le dépôt local
-git add -A
-git commit -m "Initial implementation: French NER MCP server and verification CLI"
-git remote add origin git@github.com:athoune/ner-my-french.git
+# les commits existent déjà : il ne manque que le dépôt distant
+gh repo create athoune/ner-mcp-fr --public --source=. --remote=origin --push
+
+# ou, sans gh
+git remote add origin git@github.com:athoune/ner-mcp-fr.git
 git push -u origin main
 ```
 
@@ -35,7 +36,7 @@ Sur <https://pypi.org/manage/account/publishing/> → *Add a pending publisher* 
 |---|---|
 | PyPI Project Name | `ner-mcp-fr` |
 | Owner | `athoune` |
-| Repository name | `ner-my-french` |
+| Repository name | `ner-mcp-fr` |
 | Workflow name | `release.yml` |
 | Environment name | `pypi` |
 

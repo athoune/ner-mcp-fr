@@ -1,4 +1,4 @@
-# SPECS — `ner-my-french` : serveur MCP de NER français
+# SPECS — `ner-mcp-fr` : serveur MCP de NER français
 
 > Statut : **spécification validée (v1.0)** — arbitrages tranchés en §13.2 le 2026-11-05.
 > Auteur : OpenCode / DeepSeek V4.1 Flash — 2026-11-05.
@@ -117,7 +117,7 @@ bouton de configuration.
 ## 6. Architecture
 
 ```
-ner-my-french/
+ner-mcp-fr/
 ├── SPECS.md
 ├── README.md                  # install, config hôte, exemples, attribution modèle
 ├── pyproject.toml             # project + extras + script ner-mcp-fr
@@ -541,7 +541,7 @@ cache. Ne charge **pas** le modèle.
 
 **La contrainte à ne pas se raconter.** `uvx ner-mcp-fr` résout le nom **sur PyPI**, pas sur
 GitHub. Sans publication, la seule commande honnête est
-`uvx --from git+https://github.com/athoune/ner-my-french ner-mcp-fr`. Annoncer « ça marche depuis
+`uvx --from git+https://github.com/athoune/ner-mcp-fr ner-mcp-fr`. Annoncer « ça marche depuis
 GitHub » sans paquet publié serait faux.
 
 | Élément | Rôle |

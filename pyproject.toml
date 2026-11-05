@@ -42,9 +42,9 @@ dependencies = [
 ner-mcp-fr = "ner_mcp.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/athoune/ner-my-french"
-Repository = "https://github.com/athoune/ner-my-french"
-Issues = "https://github.com/athoune/ner-my-french/issues"
+Homepage = "https://github.com/athoune/ner-mcp-fr"
+Repository = "https://github.com/athoune/ner-mcp-fr"
+Issues = "https://github.com/athoune/ner-mcp-fr/issues"
 
 [dependency-groups]
 dev = [
