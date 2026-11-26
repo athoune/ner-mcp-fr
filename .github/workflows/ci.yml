@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7
       # setup-uv publishes no floating major tag, unlike actions/*: the exact version is the
       # only ref that resolves. Dependabot bumps it.
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
       - run: uv sync --locked
@@ -42,7 +42,7 @@ jobs:
             python: "3.13"
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
       - name: Build sdist and wheel
